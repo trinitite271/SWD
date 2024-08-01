@@ -1,17 +1,78 @@
-% surface wave dispersion curve inversion with multi-offset data and fundamental mode
-% Zhang Chang zhangchang23@mails.jlu.edu.cn; JIng Li, KAUST, jing.li@kaust.edu.sa 
-% Improved efficiency and readability of the code
-% C++ Eigen accelerate 2DFD; Modification for inversion logic
-%% 
+% Skeletonized Wave-Equation Dispersion Spectrum Inversion (SWD)
+%
+% SWD is a novel approach in geophysical research aimed at
+% obtaining a robust and reliable near-surface S-wave velocity structure. This
+% novel method leverages a skeletal inversion framework that eschews traditional
+% full waveform inversion's susceptibility to cycle-skipping by implementing a
+% smooth gradient approximation between the dispersion spectrum and the misfit
+% function through the SoftMax approximation.
+%
+% The technique innovatively derives the gradient of the misfit function with
+% respect to the velocity model utilizing the chain rule and adjoint state method.
+% This integration allows SWD to couple with the wave equation, enabling precise
+% and stable S-wave velocity inversions. Unlike conventional methods, SWD does not
+% depend on a layered assumption, thus enhancing lateral resolution significantly.
+%
+% SWD capitalizes on the concept of skeletonizing complex surface wave arrivals
+% into simpler formsspecifically, picked dispersion curves in the phase-velocity
+% and frequency domains, akin to wave-equation traveltime tomography. These
+% dispersion curves are primarily obtained from Rayleigh waves captured by
+% vertical-component geophones.
+%
+% The misfit function itself is defined as the sum of the squared differences
+% between the wavenumbers of the predicted and observed dispersion curves,
+% reflecting the method's refined approach to accurately capturing subsurface
+% velocity structures.
+%
+% Developers:
+% Chang Zhang, Jilin University
+% Email: zhangchang23@mails.jlu.edu.cn
+% QQ: 1208874615
+%
+% Jing Li, King Abdullah University of Science and Technology (KAUST)
+% Email: jing.li@kaust.edu.sa
+%
+% Features:
+%
+% 1. Multi-offset approach: SWD employs a multi-offset method where offsets
+%    vary from long to short.
+% 2. Accelerated by C++: The finite difference forward and inverse kernels used
+%    in SWD are accelerated using C++.
+% 3. Suitable for elastic wave and flat surface conditions.
+% 4. Dispersion curve extraction using the Linear Radon Transform.
+%
+%
+% Usage:
+% Run this example.
+%
+% License:
+%
+% GNU GENERAL PUBLIC LICENSE
+% Version 3, 29 June 2007
+%
+% Copyright (C) 2024 Zhang Chang, Li jing and CSIM group
+%
+% This file is part of SWD.
+%
+% SWD is free software: you can redistribute it and/or modify
+% it under the terms of the GNU General Public License as published by
+% the Free Software Foundation, either version 3 of the License, or
+% (at your option) any later version.
+%
+% This program is distributed in the hope that it will be useful,
+% but WITHOUT ANY WARRANTY; without even the implied warranty of
+% MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+% GNU General Public License for more details.
+%
+% You should have received a copy of the GNU General Public License
+% along with this program. If not, see <https://www.gnu.org/licenses/>.
+%% prapare the data
 clc;
 clear
 close all;
 addpath('./core/');
-model_dir='C_model';
-% load(['./model/',model_dir,'/low_vel.mat']);
-load('model8_2.mat')
+load('./model/model8_2.mat');
 vs = model8_2;
-% vs = imresize(vs,[40,300],'nearest');
 [nz,nx]=size(vs);
 vs=single(vs);
 vp=vs*1.732;
@@ -22,37 +83,32 @@ dx=1;%dx=(min(vs_d(:))/fr/12);
 dt=dx/max(vp(:))*0.5;
 dtx=dt/dx;
 for i=1:nx
-%     vs(:,i)=linspace((vsmin+vsmax)/2,(vsmin+vsmax)/2,nz);
-    vs(:,i)=linspace(min(vs(:)),max(vs(:)),nz);
+    vs(:,i)=linspace(vsmin,vsmax,nz);
 end
-load('vs3_0300_ADWD.mat', 'vs3_0300_init_WD')
-vs = vs3_0300_init_WD;
 vp=vs*1.732;
 pickMethod=1;  %1==FDC 2==argmax
 nt=floor((nx*dx/min(vs(:))/dt+1000)/10)*10-500;  % time step
 [s,nw]=ricker(fr,dt,nt); s =single(s); % source wavelet
 nbc=40;   % boundary layer
-%% define acquisition geometry
+% define acquisition geometry
 ds=6; sx=single(1:ds:nx); sz=zeros(size(sx),'single')+1;[~,ns]=size(sx);
 dg=2;gx=single(1:dg:nx);  gz=zeros(size(gx),'single')+1;  ng=numel(gx);
 M=ds/dg;refsx=floor(sx/dg)+1;
 dg=dg*dx;
-%% define wavefield record
+% define wavefield record
 dt_wf=dt*5; nt_wf=floor((nt-1)*dt/dt_wf)+1;
 pur=-0.05;
 offset=floor(1.5*nz*dx);   % multi-offset &the maximum offset
-offset=12;
+offset=45;
 offmin=3;offmax=floor(1.5*nz*dx);
 NN=(offset-offmin)/3;   % offset change number
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 parameter_type=0;
 fd_order=22;fsz=0;source_type='w';
 isfs=1;
 
 parallel_init(ns);
 
-
-%% Set Radon Transform papramter to cal. phase velocity 
+% Set Radon Transform papramter to cal. phase velocity 
 vmin=floor(min(vs_d(:))/2);
 vmax=floor(max(vs_d(:))*1.2);
 np=vmax-vmin+1;
@@ -74,7 +130,7 @@ imagesc(seismo_v_d(:,:,1))
 [a,b]=size(seismo_v_d(:,:,1));  
 iteration=190;
 
-%% ++++++++Start iteration 
+%% ++++Start SWD iversion ++++
 %%--------------------------------------------------------------
 k =1;kk=1;
 vs_all=zeros(nz,nx,100);
@@ -100,17 +156,15 @@ fre=2*pi*linspace(fmin,fmax,(fmax-fmin)/df+1);
 ml = zeros(np,npair,ns);
 ml1 = zeros(np,npair,ns);
 %% Cal. the obsdata dispersion curve two sides(Left and right)
-line_mask_r = ones(npair,ns);
-line_mask_l = ones(npair,ns);
 cr_0 = 1.*ones(npair,ns);
 cr_0l = 1.*ones(npair,ns);
 parfor is=1:ns-floor(m/M)-round(w/M)
     [ml(:,:,is),dataLen]=RTr(seismo_v_d(:,:,is),is,df,dt,np,vmin,vmax,fmin,fmax,a,b,dg,offset,m,FK,M);
-    [line_mask_r(:,is),~,cr_0(:,is)] = LHDispPick(ml(:,:,is),npair,vmin,cr_0(:,is),line_mask_r(:,is),dataLen,pickMethod);
+    [~,cr_0(:,is)] = LHDispPick(ml(:,:,is),npair,vmin,cr_0(:,is),dataLen,pickMethod);
 end
 parfor is=round(w/M)+floor(m/M)+1:ns
     [ml1(:,:,is),dataLen]=RTl(seismo_v_d(:,:,is),is,df,dt,np,vmin,vmax,fmin,fmax,a,b,dg,offset,m,FK,M);
-    [line_mask_l(:,is),~,cr_0l(:,is)] = LHDispPick(ml1(:,:,is),npair,vmin,cr_0l(:,is),line_mask_l(:,is),dataLen,pickMethod);
+    [~,cr_0l(:,is)] = LHDispPick(ml1(:,:,is),npair,vmin,cr_0l(:,is),dataLen,pickMethod);
 end
 
 cr_pre_r = 1.*ones(npair,ns);
@@ -122,37 +176,24 @@ cr_pre_l = 1.*ones(npair,ns);
    
 parfor is=1:ns
    [~,seismo_v,wavefield_gradient]=staggerfd_eigen(is,nbc,nt,dtx,dx,dt,sx(is),sz(is),gx,gz,s,vp,vs,isfs,fsz,fd_order,source_type,parameter_type,dt_wf,nt_wf);
-   pre_mask_r = zeros(npair,ns);
-   pre_mask_l = zeros(npair,ns);
    saveForBackwardr = 0;
    saveForBackwardl = 0;
         if is<=ns-floor(m/M)-round(w/M)
             [mlr,dataLen,saveForBackwardr]=RTrAD(seismo_v,is,df,dt,np,vmin,vmax,fmin,fmax,a,b,dg,offset,m,FK,M); % Cal. the predicetd data dispersion curve for two sides 
-            [pre_mask_r,res_r(is),cr_pre_r(:,is)] = LHDispPick(mlr,npair,vmin,cr_0(:,is),line_mask_r(:,is),dataLen,pickMethod);
+            [res_r(is),cr_pre_r(:,is)] = LHDispPick(mlr,npair,vmin,cr_0(:,is),dataLen,pickMethod);
             saveForBackwardr.cr_r = cr_pre_r(:,is)-vmin;
         end
 
         if is>=round(w/M)+floor(m/M)+1
             [mll,dataLen,saveForBackwardl]=RTlAD(seismo_v,is,df,dt,np,vmin,vmax,fmin,fmax,a,b,dg,offset,m,FK,M); % Cal. the predicetd data dispersion curve for two sides 
-            [pre_mask_l,res_l(is),cr_pre_l(:,is)] = LHDispPick(mll,npair,vmin,cr_0l(:,is),line_mask_l(:,is),dataLen,pickMethod);
+            [res_l(is),cr_pre_l(:,is)] = LHDispPick(mll,npair,vmin,cr_0l(:,is),dataLen,pickMethod);
             saveForBackwardl.cr_l = cr_pre_l(:,is)-vmin;
         end
         grad_outputr = cr_pre_r(:,is)-cr_0(:,is);
         grad_outputl = cr_pre_l(:,is)-cr_0l(:,is);
-
-%     [seismo_v_d1]=weight_data_muti3(seismo_v_d(:,:,is),seismo_v,is,dt,df,offset,dg,0,w,M,m,ns,refsx,win,np,vmin,vmax,fmin,fmax, ...
-%     cr_0(:,is),cr_0l(:,is),cr_pre_r(:,is),cr_pre_l(:,is),FK,ind,pre_mask_r,pre_mask_l); %The key step to calculate the backprohated data
-
-%     [seismo_v_d1]=ADWDgrad_norm(nt,ng,ns,npair,is,w,m,M,SoftArgNorm,grad_outputr,grad_outputl,space_M,saveForBackwardr,saveForBackwardl);
-% mask = envelope(norm_trace(seismo_v),300,'analytic');
-% mask(mask>0.1)=1; 
-% mask(mask~=1)=0; 
-% [seismo_v_d1]=ADWDgrad_norm(nt,ng,ns,npair,is,w,m,M,SoftArgNorm,grad_outputr,grad_outputl,space_M,saveForBackwardr,saveForBackwardl);
+%     [seismo_v_d2(:,:,is)]=weight_data_muti3(seismo_v_d(:,:,is),seismo_v,is,dt,df,offset,dg,0,w,M,m,ns,refsx,win,np,vmin,vmax,fmin,fmax, ...
+%     cr_0(:,is),cr_0l(:,is),cr_pre_r(:,is),cr_pre_l(:,is),FK,ind); %The key step to calculate the backprohated data
 [seismo_v_d1]=ADWDgrad_1(nt,ng,ns,npair,is,w,m,M,SoftArgNorm,grad_outputr,grad_outputl,space_M,saveForBackwardr,saveForBackwardl);
-% [seismo_v_d1]=ADWDgrad3(nt,ng,ns,npair,is,w,m,M,SoftArgNorm,grad_outputr,grad_outputl,space_M,saveForBackwardr,saveForBackwardl);
-
-% seismo_v_d1 = seismo_v_d1 .* mask;  
-% [seismo_v_d1]=ADWDgradlimband(nt,ng,ns,npair,is,w,m,M,SoftArgNorm,grad_outputr,grad_outputl,space_M,saveForBackwardr,saveForBackwardl);
         [cl_img,cm_img,illum_div]=e2drtm_eigen(wavefield_gradient,single(seismo_v_d1),is,nbc,nt,dtx,dx,dt,gx,gz,s,vp,vs,isfs,fsz,fd_order,parameter_type,dt_wf);
         g_cl = g_cl+cl_img;g_cm = g_cm+cm_img;g_illum = g_illum+illum_div;
 end
@@ -181,12 +222,12 @@ parfor is=1:ns
     [~,seismo_v,~]=staggerfd_eigen(is,nbc,nt,dtx,dx,dt,sx(is),sz(is),gx,gz,s,vp,vs1,isfs,fsz,fd_order,source_type,parameter_type,dt_wf,nt_wf);
     if is<=ns-floor(m/M)-round(w/M)
         [mlr,dataLen]=RTr(seismo_v,is,df,dt,np,vmin,vmax,fmin,fmax,a,b,dg,offset,m,FK,M); % Cal. the predicetd data dispersion curve for two sides 
-        [pre_mask_r,res_r(is),cr_pre_r(:,is)] = LHDispPick(mlr,npair,vmin,cr_0(:,is),line_mask_r(:,is),dataLen,pickMethod);
+        [res_r(is),cr_pre_r(:,is)] = LHDispPick(mlr,npair,vmin,cr_0(:,is),dataLen,pickMethod);
 
     end
     if is>=round(w/M)+floor(m/M)+1
         [mll,dataLen]=RTl(seismo_v,is,df,dt,np,vmin,vmax,fmin,fmax,a,b,dg,offset,m,FK,M);
-        [pre_mask_l,res_l(is),cr_pre_l(:,is)] = LHDispPick(mll,npair,vmin,cr_0l(:,is),line_mask_l(:,is),dataLen,pickMethod);
+        [res_l(is),cr_pre_l(:,is)] = LHDispPick(mll,npair,vmin,cr_0l(:,is),dataLen,pickMethod);
     end
 
 
@@ -208,12 +249,12 @@ parfor is=1:ns
    [~,seismo_v,~]=staggerfd_eigen(is,nbc,nt,dtx,dx,dt,sx(is),sz(is),gx,gz,s,vp,vs1,isfs,fsz,fd_order,source_type,parameter_type,dt_wf,nt_wf);
     if is<=ns-floor(m/M)-round(w/M)
         [mlr,dataLen]=RTr(seismo_v,is,df,dt,np,vmin,vmax,fmin,fmax,a,b,dg,offset,m,FK,M); % Cal. the predicetd data dispersion curve for two sides 
-        [pre_mask_r,res_r(is),cr_pre_r(:,is)] = LHDispPick(mlr,npair,vmin,cr_0(:,is),line_mask_r(:,is),dataLen,pickMethod);
+        [res_r(is),cr_pre_r(:,is)] = LHDispPick(mlr,npair,vmin,cr_0(:,is),dataLen,pickMethod);
 
     end
     if is>=round(w/M)+floor(m/M)+1
         [mll,dataLen]=RTl(seismo_v,is,df,dt,np,vmin,vmax,fmin,fmax,a,b,dg,offset,m,FK,M);
-        [pre_mask_l,res_l(is),cr_pre_l(:,is)] = LHDispPick(mll,npair,vmin,cr_0l(:,is),line_mask_l(:,is),dataLen,pickMethod);
+        [res_l(is),cr_pre_l(:,is)] = LHDispPick(mll,npair,vmin,cr_0l(:,is),dataLen,pickMethod);
     end
 
 end
@@ -234,12 +275,12 @@ parfor is=1:ns
     [~,seismo_v,~]=staggerfd_eigen(is,nbc,nt,dtx,dx,dt,sx(is),sz(is),gx,gz,s,vp,vs1,isfs,fsz,fd_order,source_type,parameter_type,dt_wf,nt_wf);
     if is<=ns-floor(m/M)-round(w/M)
         [mlr,dataLen]=RTr(seismo_v,is,df,dt,np,vmin,vmax,fmin,fmax,a,b,dg,offset,m,FK,M); % Cal. the predicetd data dispersion curve for two sides 
-        [pre_mask_r,res_r(is),cr_pre_r(:,is)] = LHDispPick(mlr,npair,vmin,cr_0(:,is),line_mask_r(:,is),dataLen,pickMethod);
+        [res_r(is),cr_pre_r(:,is)] = LHDispPick(mlr,npair,vmin,cr_0(:,is),dataLen,pickMethod);
 
     end
     if is>=round(w/M)+floor(m/M)+1
         [mll,dataLen]=RTl(seismo_v,is,df,dt,np,vmin,vmax,fmin,fmax,a,b,dg,offset,m,FK,M);
-        [pre_mask_l,res_l(is),cr_pre_l(:,is)] = LHDispPick(mll,npair,vmin,cr_0l(:,is),line_mask_l(:,is),dataLen,pickMethod);
+        [res_l(is),cr_pre_l(:,is)] = LHDispPick(mll,npair,vmin,cr_0l(:,is),dataLen,pickMethod);
     end
 
 end
@@ -265,12 +306,12 @@ parfor is=1:ns
    [~,seismo_v,~]=staggerfd_eigen(is,nbc,nt,dtx,dx,dt,sx(is),sz(is),gx,gz,s,vp,vs1,isfs,fsz,fd_order,source_type,parameter_type,dt_wf,nt_wf);
     if is<=ns-floor(m/M)-round(w/M)
         [mlr,dataLen]=RTr(seismo_v,is,df,dt,np,vmin,vmax,fmin,fmax,a,b,dg,offset,m,FK,M); % Cal. the predicetd data dispersion curve for two sides 
-        [pre_mask_r,res_r(is),cr_pre_r(:,is)] = LHDispPick(mlr,npair,vmin,cr_0(:,is),line_mask_r(:,is),dataLen,pickMethod);
+        [res_r(is),cr_pre_r(:,is)] = LHDispPick(mlr,npair,vmin,cr_0(:,is),dataLen,pickMethod);
 
     end
     if is>=round(w/M)+floor(m/M)+1
         [mll,dataLen]=RTl(seismo_v,is,df,dt,np,vmin,vmax,fmin,fmax,a,b,dg,offset,m,FK,M);
-        [pre_mask_l,res_l(is),cr_pre_l(:,is)] = LHDispPick(mll,npair,vmin,cr_0l(:,is),line_mask_l(:,is),dataLen,pickMethod);
+        [res_l(is),cr_pre_l(:,is)] = LHDispPick(mll,npair,vmin,cr_0l(:,is),dataLen,pickMethod);
     end
 
 end
@@ -317,15 +358,3 @@ end
  toc; 
 
 dfs = mean(mean((vs-vs_d).^2))
-% for i=1:nx
-%     vs3_udlm_init_WD(:,i)=linspace(vsmin,vsmax,nz);
-% end
-% residual3_udlm_WD = residual;
-% vs3_udlm_WD = vs;
-% vs3_all_udlm_WD = vs_all;
-% dk_vs3_all_udlm_WD = dk_vs_all;
-% vs3_d_udlm_WD = vs_d;
-% offsets3_udlm_WD = offsets;
-% save('vs3_udlm_ADWD.mat','vs3_udlm_init_WD','vs3_udlm_WD',...
-%     'vs3_all_udlm_WD','dk_vs3_all_udlm_WD','vs3_d_udlm_WD',...
-%     'offsets3_udlm_WD','residual3_udlm_WD','-append')
